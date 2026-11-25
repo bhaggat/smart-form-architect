@@ -8,13 +8,18 @@ interface StorageResult {
 chrome.runtime.onInstalled.addListener(() => {
   // Initialize storage
   chrome.storage.local.get(
-    ["templates", "autoIncrement"],
-    (result: StorageResult) => {
+    ["templates", "autoIncrement", "reviewPromptState"],
+    (result: StorageResult & { reviewPromptState?: { installedAt?: number } }) => {
       if (!result.templates) {
         chrome.storage.local.set({ templates: {} });
       }
       if (result.autoIncrement === undefined) {
         chrome.storage.local.set({ autoIncrement: 1 });
+      }
+      if (!result.reviewPromptState?.installedAt) {
+        chrome.storage.local.set({
+          reviewPromptState: { installedAt: Date.now() },
+        });
       }
     },
   );

@@ -1,7 +1,7 @@
 {
   "name": "smart-form-architect",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,12 @@
     "version:patch": "node scripts/update-version.js patch",
     "version:minor": "node scripts/update-version.js minor",
     "version:major": "node scripts/update-version.js major",
-    "chrome:deploy": "node scripts/deploy-chrome.js",
+    "chrome:deploy": "node scripts/deploy.js --no-bump",
+    "deploy": "node scripts/deploy.js",
+    "deploy:patch": "node scripts/deploy.js patch",
+    "deploy:minor": "node scripts/deploy.js minor",
+    "deploy:major": "node scripts/deploy.js major",
+    "upload": "node scripts/deploy.js --skip-submit",
     "chrome:publish": "node scripts/publish.js",
     "chrome:token": "node scripts/generate-token.js",
     "static:deploy": "./scripts/deploy-static.sh"

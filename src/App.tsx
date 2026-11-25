@@ -11,6 +11,7 @@ import {
   Zap,
 } from "lucide-react";
 import Settings from "./Settings";
+import ReviewPrompt from "./ReviewPrompt";
 
 function App() {
   const appVersion = chrome?.runtime?.getManifest?.()?.version || "1.0.0";
@@ -544,6 +545,9 @@ function App() {
             )}
           </div>
         </div>
+
+        {/* Review Prompt (shown after 10+ days of use) */}
+        <ReviewPrompt />
 
         {/* Footer / Meta Actions */}
         <div
