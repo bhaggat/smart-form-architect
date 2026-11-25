@@ -41,4 +41,4 @@ We may update our Privacy Policy periodically. Since we collect no email address
 
 ## 8. Contact
 
-If you have any questions or concerns regarding this policy, please contact us. _(Add your email address here before publishing)_
+If you have any questions or concerns regarding this policy, please contact us. dhruvbhagat98@gmail.com
