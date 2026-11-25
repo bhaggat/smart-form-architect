@@ -3,57 +3,60 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { Sparkles } from "lucide-react";
+import {
+  DEFAULT_ACCENT_COLOR,
+  type FormField,
+  type Profile,
+  type TemplateData,
+  type TemplatesMap,
+} from "./types/storage";
+import { parseDynamicTags } from "./utils/tags";
+import {
+  findMatchingTemplate,
+  isDomainExcluded,
+  resolveProfilesFromStorage,
+} from "./utils/matching";
 
-interface FormField {
-  id: string;
-  name: string;
-  placeholder: string;
-  type: string;
-  value: string;
-}
+type FormElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 
-interface TemplateData {
-  url: string;
-  name?: string;
-  fields: FormField[];
-}
-
-function scoreMatch(
-  el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
-  savedField: FormField,
-): number {
+function scoreMatch(el: FormElement, savedField: FormField): number {
   let score = 0;
 
   const elId = (el.id || "").toLowerCase();
   const elName = (el.name || "").toLowerCase();
   const elPlaceholder =
-    (el as HTMLInputElement).placeholder?.toLowerCase() || "";
-  const elAriaLabel = el.getAttribute("aria-label")?.toLowerCase() || "";
-  const elTitle = el.getAttribute("title")?.toLowerCase() || "";
+    "placeholder" in el
+      ? ((el as HTMLInputElement).placeholder || "").toLowerCase()
+      : "";
+  const elAriaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
+  const elTitle = (el.getAttribute("title") || "").toLowerCase();
+  const elAutocomplete = (el.getAttribute("autocomplete") || "").toLowerCase();
+  const elTestId = (
+    el.getAttribute("data-testid") ||
+    el.getAttribute("data-cy") ||
+    ""
+  ).toLowerCase();
 
   const sfId = (savedField.id || "").toLowerCase();
   const sfName = (savedField.name || "").toLowerCase();
   const sfPlaceholder = (savedField.placeholder || "").toLowerCase();
 
-  // Exact ID or Name match is high confidence
   if (elId && sfId && elId === sfId) score += 5;
   if (elName && sfName && elName === sfName) score += 5;
 
-  // Partial ID or Name match
   if (elId && sfName && elId.includes(sfName)) score += 2;
   if (elName && sfName && elName.includes(sfName)) score += 2;
 
-  // Placeholder match
   if (elPlaceholder && sfPlaceholder && elPlaceholder === sfPlaceholder)
     score += 3;
   else if (elPlaceholder && sfName && elPlaceholder.includes(sfName))
     score += 2;
 
-  // Aria-label and Title matching (very important for modern accessible web apps)
   if (elAriaLabel && sfName && elAriaLabel.includes(sfName)) score += 3;
   if (elTitle && sfName && elTitle.includes(sfName)) score += 2;
+  if (elAutocomplete && sfName && elAutocomplete.includes(sfName)) score += 3;
+  if (elTestId && sfName && elTestId.includes(sfName)) score += 2;
 
-  // Label text matching
   if (el.labels && el.labels.length > 0) {
     const labelText = Array.from(el.labels)
       .map((l) => l.innerText)
@@ -63,7 +66,6 @@ function scoreMatch(
       score += 4;
     }
   } else {
-    // Try to find nearby Label if not explicitly linked
     const nearbyLabel = el.parentElement
       ?.querySelector("label")
       ?.innerText.toLowerCase();
@@ -75,38 +77,65 @@ function scoreMatch(
   return score;
 }
 
-const parseValue = async (val: string): Promise<string> => {
-  if (val.includes("{{timestamp}}")) {
-    val = val.replace(/\{\{timestamp\}\}/g, Date.now().toString());
+/**
+ * Uses native prototype setters so React, Vue, and Angular controlled inputs
+ * reliably detect programmatic value changes.
+ */
+function setNativeValue(el: FormElement, value: string): void {
+  if (el instanceof HTMLSelectElement) {
+    const lowerVal = value.toLowerCase();
+    const matchingOption = Array.from(el.options).find(
+      (opt) =>
+        opt.value.toLowerCase() === lowerVal ||
+        opt.text.trim().toLowerCase() === lowerVal,
+    );
+    const targetVal = matchingOption ? matchingOption.value : value;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      "value",
+    )?.set;
+    if (setter) setter.call(el, targetVal);
+    else el.value = targetVal;
+    return;
   }
-  if (val.includes("{{autoIncrement}}")) {
-    const res = await new Promise<{ value: number }>((resolve) => {
-      chrome.runtime.sendMessage({ action: "getAutoIncrement" }, resolve);
-    });
-    val = val.replace(/\{\{autoIncrement\}\}/g, String(res.value));
-  }
-  return val;
-};
+
+  const proto =
+    el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+  if (setter) setter.call(el, value);
+  else el.value = value;
+}
+
+const getAutoIncrementFromBg = (): Promise<number> =>
+  new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { action: "getAutoIncrement" },
+      (res: { value?: number } | undefined) => resolve(res?.value ?? 1),
+    );
+  });
 
 const extractFields = (
   container: HTMLElement | Document | HTMLFormElement,
+  excludePasswords = true,
 ): FormField[] => {
-  const inputs = container.querySelectorAll<
-    HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
-  >(
-    "input:not([type='hidden']):not([type='submit']):not([type='button']), textarea, select",
+  const inputs = container.querySelectorAll<FormElement>(
+    "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='reset']), textarea, select",
   );
 
   const fields: FormField[] = [];
   inputs.forEach((input) => {
+    if (excludePasswords && input.type === "password") return;
+
     let val = input.value;
 
     if (input.type === "checkbox" || input.type === "radio") {
       const checked = (input as HTMLInputElement).checked;
-      if (!checked) return; // Skip unchecked options
+      if (!checked) return;
       val = val || "true";
     } else {
-      if (!val || val.trim() === "") return; // Skip empty generic inputs
+      if (!val || val.trim() === "") return;
     }
 
     fields.push({
@@ -121,7 +150,7 @@ const extractFields = (
   return fields;
 };
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 console.log(`[SmartForm] Initializing content script. Version: ${VERSION}`);
 
 const GhostOverlay = () => {
@@ -130,24 +159,77 @@ const GhostOverlay = () => {
   const [recordMode, setRecordMode] = useState(false);
   const [enablePerField, setEnablePerField] = useState(true);
   const [enablePerPage, setEnablePerPage] = useState(false);
-  const [accentColor, setAccentColor] = useState("#8b5cf6");
+  const [enableShortcut, setEnableShortcut] = useState(true);
+  const [accentColor, setAccentColor] = useState(DEFAULT_ACCENT_COLOR);
   const [autoFillOnLoad, setAutoFillOnLoad] = useState(false);
+  const [autoFillDelay, setAutoFillDelay] = useState(800);
+  const [skipFilledFields, setSkipFilledFields] = useState(false);
+  const [excludePasswords, setExcludePasswords] = useState(true);
+  const [excludedDomains, setExcludedDomains] = useState<string[]>([]);
   const [customShortcut, setCustomShortcut] = useState("Alt+Shift+A");
   const [mutationTicker, setMutationTicker] = useState(0);
 
+  const currentUrl = window.location.href;
+  const isExcluded = useMemo(
+    () => isDomainExcluded(currentUrl, excludedDomains),
+    [currentUrl, excludedDomains],
+  );
+
+  const applyFieldValue = useCallback(
+    async (input: FormElement, field: FormField) => {
+      if (skipFilledFields) {
+        if (input.type === "checkbox" || input.type === "radio") {
+          if ((input as HTMLInputElement).checked) return;
+        } else if (input.value && input.value.trim() !== "") {
+          return;
+        }
+      }
+
+      const processedVal = await parseDynamicTags(
+        field.value,
+        getAutoIncrementFromBg,
+      );
+
+      if (input.type === "checkbox" || input.type === "radio") {
+        const lowerVal = processedVal.toLowerCase();
+        (input as HTMLInputElement).checked =
+          processedVal === input.value ||
+          ["true", "on", "checked"].includes(lowerVal);
+      } else {
+        setNativeValue(input, processedVal);
+      }
+
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+
+      const colorForPulse = accentColor || DEFAULT_ACCENT_COLOR;
+      input.animate(
+        [
+          { boxShadow: `0 0 0 0 ${colorForPulse}00` },
+          { boxShadow: `0 0 0 4px ${colorForPulse}66` },
+          { boxShadow: `0 0 0 0 ${colorForPulse}00` },
+        ],
+        { duration: 600 },
+      );
+    },
+    [accentColor, skipFilledFields],
+  );
+
   const handleAutofill = useCallback(
     async (targetEl: HTMLElement) => {
+      if (isExcluded) return;
       const container = targetEl.closest("form") || document;
       if (!template && globalFields.length === 0) return;
 
-      const inputs = container.querySelectorAll<
-        HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
-      >("input:not([type='hidden']):not([type='submit']), textarea, select");
+      const inputs = container.querySelectorAll<FormElement>(
+        "input:not([type='hidden']):not([type='submit']):not([type='button']), textarea, select",
+      );
 
       const allFields = [...(template?.fields || []), ...globalFields];
-      const colorForPulse = accentColor || "#8b5cf6";
 
       for (const input of inputs) {
+        if (excludePasswords && input.type === "password") continue;
+
         let bestMatch: FormField | null = null;
         let highestScore = 0;
         allFields.forEach((f) => {
@@ -159,47 +241,35 @@ const GhostOverlay = () => {
         });
 
         if (highestScore >= 3 && bestMatch) {
-          const processedVal = await parseValue((bestMatch as FormField).value);
-          if (input.type === "checkbox" || input.type === "radio") {
-            const lowerVal = processedVal.toLowerCase();
-            (input as HTMLInputElement).checked =
-              processedVal === input.value ||
-              ["true", "on", "checked"].includes(lowerVal);
-          } else {
-            input.value = processedVal;
-          }
-
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-
-          // Premium feedback
-          input.animate(
-            [
-              { boxShadow: `0 0 0 0 ${colorForPulse}00` },
-              { boxShadow: `0 0 0 4px ${colorForPulse}66` },
-              { boxShadow: `0 0 0 0 ${colorForPulse}00` },
-            ],
-            { duration: 600 },
-          );
+          await applyFieldValue(input, bestMatch);
         }
       }
     },
-    [template, globalFields, accentColor],
+    [template, globalFields, isExcluded, excludePasswords, applyFieldValue],
   );
 
-  // Implement auto-fill on load
+  // Auto-fill on load
   useEffect(() => {
+    if (isExcluded) return;
     if (autoFillOnLoad && (template || globalFields.length > 0)) {
-      // Small delay to ensure page is ready
       const timer = setTimeout(() => {
         handleAutofill(document.body);
-      }, 1000);
+      }, autoFillDelay);
       return () => clearTimeout(timer);
     }
-  }, [autoFillOnLoad, template, globalFields, handleAutofill]);
+  }, [
+    autoFillOnLoad,
+    autoFillDelay,
+    template,
+    globalFields,
+    handleAutofill,
+    isExcluded,
+  ]);
 
-  // Support custom shortcut via keydown
+  // Support custom shortcut via keydown (respecting enableShortcut)
   useEffect(() => {
+    if (!enableShortcut || isExcluded) return;
+
     const handleKeyDown = (e: KeyboardEvent) => {
       const modifiers = [];
       if (e.ctrlKey) modifiers.push("Ctrl");
@@ -218,37 +288,43 @@ const GhostOverlay = () => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [customShortcut, handleAutofill]);
+  }, [customShortcut, enableShortcut, isExcluded, handleAutofill]);
 
-  // Use MutationObserver instead of periodic ticker
+  // MutationObserver + resize listener for accurate icon positioning
   useEffect(() => {
     let timeout: ReturnType<typeof setTimeout>;
-    const observer = new MutationObserver(() => {
+    const bump = () => {
       clearTimeout(timeout);
       timeout = setTimeout(() => {
         setMutationTicker((t) => t + 1);
-      }, 500); // Debounce
-    });
+      }, 350);
+    };
 
+    const observer = new MutationObserver(bump);
     observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("resize", bump);
+
     return () => {
       observer.disconnect();
+      window.removeEventListener("resize", bump);
       clearTimeout(timeout);
     };
   }, []);
 
   const highMatchElements = useMemo(() => {
-    const inputs = document.querySelectorAll<
-      HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
-    >("input:not([type='hidden']):not([type='submit']), textarea, select");
+    if (isExcluded) return [];
 
-    const matches: { el: HTMLElement; field: FormField }[] = [];
+    const inputs = document.querySelectorAll<FormElement>(
+      "input:not([type='hidden']):not([type='submit']):not([type='button']), textarea, select",
+    );
+
+    const matches: { el: FormElement; field: FormField }[] = [];
     const allFields = [...(template?.fields || []), ...globalFields];
 
     if (allFields.length === 0) return matches;
 
     inputs.forEach((input) => {
-      // Don't match if hidden/not visible
+      if (excludePasswords && input.type === "password") return;
       if (input.offsetWidth === 0 || input.offsetHeight === 0) return;
 
       let bestMatch: FormField | null = null;
@@ -268,16 +344,15 @@ const GhostOverlay = () => {
     });
 
     return matches;
-    // mutationTicker is used to force re-evaluation when DOM changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [template, globalFields, mutationTicker]);
+  }, [template, globalFields, mutationTicker, isExcluded, excludePasswords]);
 
   const formGroups = useMemo(() => {
-    if (!enablePerPage) return [];
+    if (!enablePerPage || isExcluded) return [];
 
     const groups: {
       form: HTMLFormElement | null;
-      firstItem: { el: HTMLElement; field: FormField };
+      firstItem: { el: FormElement; field: FormField };
     }[] = [];
     highMatchElements.forEach((item) => {
       const form = item.el.closest("form");
@@ -286,10 +361,44 @@ const GhostOverlay = () => {
       }
     });
     return groups;
-  }, [highMatchElements, enablePerPage]);
+  }, [highMatchElements, enablePerPage, isExcluded]);
 
   useEffect(() => {
-    const url = window.location.origin + window.location.pathname;
+    const pageUrl = window.location.origin + window.location.pathname;
+
+    const syncFromStorage = (res: Record<string, unknown>) => {
+      if (res.recordMode !== undefined)
+        setRecordMode(Boolean(res.recordMode));
+      if (res.enablePerField !== undefined)
+        setEnablePerField(Boolean(res.enablePerField));
+      if (res.enablePerPage !== undefined)
+        setEnablePerPage(Boolean(res.enablePerPage));
+      if (res.enableShortcut !== undefined)
+        setEnableShortcut(Boolean(res.enableShortcut));
+      if (typeof res.accentColor === "string")
+        setAccentColor(res.accentColor);
+      if (res.autoFillOnLoad !== undefined)
+        setAutoFillOnLoad(Boolean(res.autoFillOnLoad));
+      if (typeof res.autoFillDelay === "number")
+        setAutoFillDelay(res.autoFillDelay);
+      if (res.skipFilledFields !== undefined)
+        setSkipFilledFields(Boolean(res.skipFilledFields));
+      if (res.excludePasswords !== undefined)
+        setExcludePasswords(Boolean(res.excludePasswords));
+      if (Array.isArray(res.excludedDomains))
+        setExcludedDomains(res.excludedDomains as string[]);
+      if (typeof res.customShortcut === "string")
+        setCustomShortcut(res.customShortcut);
+
+      const { profiles, activeProfileId } = resolveProfilesFromStorage({
+        profiles: res.profiles as Profile[] | undefined,
+        activeProfileId: res.activeProfileId as string | undefined,
+        globalFields: res.globalFields as FormField[] | undefined,
+      });
+      const activeProfile =
+        profiles.find((p) => p.id === activeProfileId) || profiles[0];
+      setGlobalFields(activeProfile?.fields || []);
+    };
 
     const listener = (changes: {
       [key: string]: chrome.storage.StorageChange;
@@ -300,51 +409,83 @@ const GhostOverlay = () => {
         setEnablePerField(Boolean(changes.enablePerField.newValue));
       if (changes.enablePerPage)
         setEnablePerPage(Boolean(changes.enablePerPage.newValue));
+      if (changes.enableShortcut)
+        setEnableShortcut(Boolean(changes.enableShortcut.newValue));
       if (changes.accentColor)
-        setAccentColor((changes.accentColor.newValue as string) || "#8b5cf6");
+        setAccentColor(
+          (changes.accentColor.newValue as string) || DEFAULT_ACCENT_COLOR,
+        );
       if (changes.autoFillOnLoad)
         setAutoFillOnLoad(Boolean(changes.autoFillOnLoad.newValue));
+      if (changes.autoFillDelay)
+        setAutoFillDelay(Number(changes.autoFillDelay.newValue ?? 800));
+      if (changes.skipFilledFields)
+        setSkipFilledFields(Boolean(changes.skipFilledFields.newValue));
+      if (changes.excludePasswords)
+        setExcludePasswords(Boolean(changes.excludePasswords.newValue));
+      if (changes.excludedDomains)
+        setExcludedDomains(
+          (changes.excludedDomains.newValue as string[]) || [],
+        );
       if (changes.customShortcut)
         setCustomShortcut(
           String(changes.customShortcut.newValue || "Alt+Shift+A"),
         );
-      if (changes.globalFields)
-        setGlobalFields((changes.globalFields.newValue as FormField[]) || []);
+
+      if (
+        changes.profiles ||
+        changes.activeProfileId ||
+        changes.globalFields
+      ) {
+        chrome.storage.local.get(
+          ["profiles", "activeProfileId", "globalFields"],
+          (res) => {
+            const { profiles, activeProfileId } = resolveProfilesFromStorage(
+              res as {
+                profiles?: Profile[];
+                activeProfileId?: string;
+                globalFields?: FormField[];
+              },
+            );
+            const activeProfile =
+              profiles.find((p) => p.id === activeProfileId) || profiles[0];
+            setGlobalFields(activeProfile?.fields || []);
+          },
+        );
+      }
+
       if (changes.templates) {
-        const newTemplates = changes.templates.newValue as Record<
-          string,
-          TemplateData
-        >;
-        if (newTemplates && newTemplates[url]) setTemplate(newTemplates[url]);
+        const newTemplates = changes.templates.newValue as TemplatesMap;
+        setTemplate(findMatchingTemplate(newTemplates, pageUrl));
       }
     };
 
     chrome.storage.onChanged.addListener(listener);
     chrome.storage.local.get(
       [
+        "profiles",
+        "activeProfileId",
         "globalFields",
         "recordMode",
         "enablePerField",
         "enablePerPage",
+        "enableShortcut",
         "accentColor",
         "autoFillOnLoad",
+        "autoFillDelay",
+        "skipFilledFields",
+        "excludePasswords",
+        "excludedDomains",
+        "customShortcut",
       ],
       (res) => {
-        setRecordMode(Boolean(res.recordMode));
-        if (res.enablePerField !== undefined)
-          setEnablePerField(Boolean(res.enablePerField));
-        if (res.enablePerPage !== undefined)
-          setEnablePerPage(Boolean(res.enablePerPage));
-        if (typeof res.accentColor === "string")
-          setAccentColor(res.accentColor);
-        if (res.autoFillOnLoad !== undefined)
-          setAutoFillOnLoad(Boolean(res.autoFillOnLoad));
-        if (res.globalFields) setGlobalFields(res.globalFields as FormField[]);
-
+        syncFromStorage(res);
         chrome.runtime.sendMessage(
-          { action: "getTemplate", payload: { url } },
-          (response: { template?: TemplateData }) => {
-            if (response && response.template) setTemplate(response.template);
+          { action: "getTemplate", payload: { url: pageUrl } },
+          (response: { template?: TemplateData | null } | undefined) => {
+            if (response && response.template) {
+              setTemplate(response.template);
+            }
           },
         );
       },
@@ -362,10 +503,10 @@ const GhostOverlay = () => {
   }, [handleAutofill]);
 
   useEffect(() => {
-    if (recordMode) {
+    if (recordMode && !isExcluded) {
       const handleSubmit = (e: Event) => {
         const form = e.target as HTMLFormElement;
-        const fields = extractFields(form);
+        const fields = extractFields(form, excludePasswords);
         const url = window.location.origin + window.location.pathname;
         const name = document.title || url;
         chrome.runtime.sendMessage({
@@ -376,7 +517,11 @@ const GhostOverlay = () => {
       document.addEventListener("submit", handleSubmit, true);
       return () => document.removeEventListener("submit", handleSubmit, true);
     }
-  }, [recordMode]);
+  }, [recordMode, isExcluded, excludePasswords]);
+
+  if (isExcluded) {
+    return null;
+  }
 
   return (
     <>
@@ -450,8 +595,8 @@ const GhostOverlay = () => {
                 top: window.scrollY + rect.top + rect.height / 2 - 14,
                 left: window.scrollX + rect.right + 8,
               }}
-              onClick={() => handleAutofill(item.el)}
-              title="SmartFill Field"
+              onClick={() => applyFieldValue(item.el, item.field)}
+              title={`SmartFill: ${item.field.name || item.field.id || "field"}`}
             >
               <Sparkles size={14} />
             </div>
@@ -508,16 +653,22 @@ root.render(<GhostOverlay />);
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === "forceSaveForm") {
-    const fields = extractFields(document);
-    const url = window.location.origin + window.location.pathname;
-    const name = document.title || url;
-    chrome.runtime.sendMessage(
-      {
-        action: "saveForm",
-        payload: { url, data: { url, name, fields } },
-      },
-      () => sendResponse({ count: fields.length }),
-    );
+    chrome.storage.local.get(["excludePasswords"], (res) => {
+      const excludePw =
+        res.excludePasswords !== undefined
+          ? Boolean(res.excludePasswords)
+          : true;
+      const fields = extractFields(document, excludePw);
+      const url = window.location.origin + window.location.pathname;
+      const name = document.title || url;
+      chrome.runtime.sendMessage(
+        {
+          action: "saveForm",
+          payload: { url, data: { url, name, fields } },
+        },
+        () => sendResponse({ count: fields.length }),
+      );
+    });
     return true;
   }
 });

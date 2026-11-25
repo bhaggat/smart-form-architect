@@ -8,13 +8,18 @@ import {
   RotateCcw,
   Palette,
   Info,
-  ExternalLink,
   Github,
   ToggleLeft,
   ToggleRight,
   ShieldAlert,
   Zap,
+  Globe,
+  Plus,
+  X,
+  Lock,
 } from "lucide-react";
+import { DEFAULT_ACCENT_COLOR, DEFAULT_SETTINGS } from "./types/storage";
+import { applyAccentTheme } from "./utils/matching";
 
 interface SettingsProps {
   onBack: () => void;
@@ -25,17 +30,40 @@ const Settings: React.FC<SettingsProps> = ({
   onBack,
   isInsideDashboard = false,
 }) => {
-  const [recordMode, setRecordMode] = useState(false);
-  const [enablePerField, setEnablePerField] = useState(true);
-  const [enablePerPage, setEnablePerPage] = useState(false);
-  const [enableShortcut, setEnableShortcut] = useState(true);
-  const [customShortcut, setCustomShortcut] = useState("Alt+Shift+A");
+  const [recordMode, setRecordMode] = useState(DEFAULT_SETTINGS.recordMode);
+  const [enablePerField, setEnablePerField] = useState(
+    DEFAULT_SETTINGS.enablePerField,
+  );
+  const [enablePerPage, setEnablePerPage] = useState(
+    DEFAULT_SETTINGS.enablePerPage,
+  );
+  const [enableShortcut, setEnableShortcut] = useState(
+    DEFAULT_SETTINGS.enableShortcut,
+  );
+  const [customShortcut, setCustomShortcut] = useState(
+    DEFAULT_SETTINGS.customShortcut,
+  );
   const [isRecording, setIsRecording] = useState(false);
-  const [autoFillOnLoad, setAutoFillOnLoad] = useState(false);
-  const [accentColor, setAccentColor] = useState("#58a6ff");
+  const [autoFillOnLoad, setAutoFillOnLoad] = useState(
+    DEFAULT_SETTINGS.autoFillOnLoad,
+  );
+  const [autoFillDelay, setAutoFillDelay] = useState(
+    DEFAULT_SETTINGS.autoFillDelay,
+  );
+  const [skipFilledFields, setSkipFilledFields] = useState(
+    DEFAULT_SETTINGS.skipFilledFields,
+  );
+  const [excludePasswords, setExcludePasswords] = useState(
+    DEFAULT_SETTINGS.excludePasswords,
+  );
+  const [excludedDomains, setExcludedDomains] = useState<string[]>(
+    DEFAULT_SETTINGS.excludedDomains,
+  );
+  const [newDomain, setNewDomain] = useState("");
+  const [accentColor, setAccentColor] = useState(DEFAULT_ACCENT_COLOR);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success">("idle");
 
-  const appVersion = chrome?.runtime?.getManifest?.()?.version || "1.0.0";
+  const appVersion = chrome?.runtime?.getManifest?.()?.version || "1.1.1";
 
   useEffect(() => {
     if (chrome && chrome.storage) {
@@ -47,6 +75,10 @@ const Settings: React.FC<SettingsProps> = ({
           "enableShortcut",
           "customShortcut",
           "autoFillOnLoad",
+          "autoFillDelay",
+          "skipFilledFields",
+          "excludePasswords",
+          "excludedDomains",
           "accentColor",
         ],
         (res) => {
@@ -62,22 +94,38 @@ const Settings: React.FC<SettingsProps> = ({
             setCustomShortcut(String(res.customShortcut));
           if (res.autoFillOnLoad !== undefined)
             setAutoFillOnLoad(Boolean(res.autoFillOnLoad));
-          if (typeof res.accentColor === "string")
+          if (typeof res.autoFillDelay === "number")
+            setAutoFillDelay(res.autoFillDelay);
+          if (res.skipFilledFields !== undefined)
+            setSkipFilledFields(Boolean(res.skipFilledFields));
+          if (res.excludePasswords !== undefined)
+            setExcludePasswords(Boolean(res.excludePasswords));
+          if (Array.isArray(res.excludedDomains))
+            setExcludedDomains(res.excludedDomains as string[]);
+          if (typeof res.accentColor === "string") {
             setAccentColor(res.accentColor);
+            applyAccentTheme(res.accentColor);
+          }
         },
       );
     }
   }, []);
 
-  const updateSetting = (key: string, value: string | boolean) => {
+  const flashSaved = () => {
+    setSaveStatus("success");
+    setTimeout(() => setSaveStatus("idle"), 1500);
+  };
+
+  const updateSetting = (
+    key: string,
+    value: string | boolean | number | string[],
+  ) => {
     if (chrome && chrome.storage) {
-      chrome.storage.local.set({ [key]: value }, () => {
-        setSaveStatus("success");
-        setTimeout(() => setSaveStatus("idle"), 1500);
-      });
+      chrome.storage.local.set({ [key]: value }, flashSaved);
+    } else {
+      flashSaved();
     }
 
-    // Update local state
     switch (key) {
       case "recordMode":
         setRecordMode(value as boolean);
@@ -97,15 +145,23 @@ const Settings: React.FC<SettingsProps> = ({
       case "autoFillOnLoad":
         setAutoFillOnLoad(value as boolean);
         break;
+      case "autoFillDelay":
+        setAutoFillDelay(value as number);
+        break;
+      case "skipFilledFields":
+        setSkipFilledFields(value as boolean);
+        break;
+      case "excludePasswords":
+        setExcludePasswords(value as boolean);
+        break;
+      case "excludedDomains":
+        setExcludedDomains(value as string[]);
+        break;
       case "accentColor":
         setAccentColor(value as string);
-        document.documentElement.style.setProperty("--accent", value as string);
+        applyAccentTheme(value as string);
         break;
     }
-  };
-
-  const startRecording = () => {
-    setIsRecording(true);
   };
 
   useEffect(() => {
@@ -122,17 +178,42 @@ const Settings: React.FC<SettingsProps> = ({
       if (e.metaKey) modifiers.push("Meta");
 
       const key = e.key === " " ? "Space" : e.key.toUpperCase();
-      // Ignore alone modifiers
       if (["CONTROL", "ALT", "SHIFT", "META"].includes(key)) return;
 
       const combo = [...modifiers, key].join("+");
-      updateSetting("customShortcut", combo);
+      setCustomShortcut(combo);
+      if (chrome && chrome.storage) {
+        chrome.storage.local.set({ customShortcut: combo }, flashSaved);
+      } else {
+        flashSaved();
+      }
       setIsRecording(false);
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [isRecording]);
+
+  const handleAddExcludedDomain = () => {
+    const cleaned = newDomain
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/\/.*$/, "");
+    if (!cleaned || excludedDomains.includes(cleaned)) {
+      setNewDomain("");
+      return;
+    }
+    updateSetting("excludedDomains", [...excludedDomains, cleaned]);
+    setNewDomain("");
+  };
+
+  const handleRemoveExcludedDomain = (domain: string) => {
+    updateSetting(
+      "excludedDomains",
+      excludedDomains.filter((d) => d !== domain),
+    );
+  };
 
   const handleExport = () => {
     if (chrome && chrome.storage) {
@@ -144,7 +225,7 @@ const Settings: React.FC<SettingsProps> = ({
         dlAnchorElem.setAttribute("href", dataStr);
         dlAnchorElem.setAttribute(
           "download",
-          `smartform-architect-vfull-${Date.now()}.json`,
+          `smartform-architect-backup-${Date.now()}.json`,
         );
         dlAnchorElem.click();
       });
@@ -174,17 +255,17 @@ const Settings: React.FC<SettingsProps> = ({
   const handleReset = () => {
     if (
       confirm(
-        "DANGER: This will delete ALL templates and global fields. Are you absolutely sure?",
+        "DANGER: This will delete ALL templates, profiles, and global fields. Are you absolutely sure?",
       )
     ) {
       if (chrome && chrome.storage) {
         chrome.storage.local.clear(() => {
           chrome.storage.local.set(
             {
-              enablePerField: true,
-              enableShortcut: true,
-              recordMode: false,
-              customShortcut: "Alt+Shift+A",
+              ...DEFAULT_SETTINGS,
+              templates: {},
+              profiles: [{ id: "default", name: "Personal", fields: [] }],
+              activeProfileId: "default",
             },
             () => {
               window.location.reload();
@@ -274,7 +355,7 @@ const Settings: React.FC<SettingsProps> = ({
                   <h4>Keyboard Shortcut</h4>
                   {enableShortcut && (
                     <button
-                      onClick={startRecording}
+                      onClick={() => setIsRecording(true)}
                       className={`badge ${isRecording ? "badge-danger animate-pulse" : "badge-accent"}`}
                       style={{
                         cursor: "pointer",
@@ -299,16 +380,19 @@ const Settings: React.FC<SettingsProps> = ({
           </div>
         </section>
 
-        {/* Suggestions Section */}
+        {/* Suggestions & Autofill Behavior Section */}
         <section className="flex flex-col gap-4">
           <h3 className="section-title">
-            <Sparkles size={18} color="var(--warning)" /> Autofill & UI
+            <Sparkles size={18} color="var(--warning)" /> Autofill &amp; UI
           </h3>
           <div className="grid gap-4">
             <div className="settings-card glass">
               <div className="flex-1">
                 <h4>Per-Field Icons</h4>
-                <p>Show small autofill icons inside detected input fields.</p>
+                <p>
+                  Show inline autofill icons next to matched input fields. Click
+                  to fill that field.
+                </p>
               </div>
               <ToggleButton
                 enabled={enablePerField}
@@ -319,7 +403,7 @@ const Settings: React.FC<SettingsProps> = ({
             <div className="settings-card glass">
               <div className="flex-1">
                 <h4>Per-Page Banner</h4>
-                <p>Show a prominent floating banner on pages with forms.</p>
+                <p>Show a floating "Autofill Form" button above forms.</p>
               </div>
               <ToggleButton
                 enabled={enablePerPage}
@@ -327,25 +411,163 @@ const Settings: React.FC<SettingsProps> = ({
               />
             </div>
 
-            <div className="settings-card glass text-muted-opacity">
+            <div className="settings-card glass">
               <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <h4>Auto-fill on Load</h4>
-                  <span
-                    className="badge badge-accent"
-                    style={{ transform: "scale(0.8)" }}
-                  >
-                    Coming Soon
-                  </span>
-                </div>
+                <h4>Auto-fill on Load</h4>
                 <p>
-                  Automatically fill forms as soon as the page finishes loading.
+                  Automatically fill matched forms as soon as a page finishes
+                  loading.
                 </p>
+                {autoFillOnLoad && (
+                  <div
+                    className="flex items-center gap-2 mt-2"
+                    style={{ fontSize: "12px", color: "var(--text-muted)" }}
+                  >
+                    <span>Delay:</span>
+                    <select
+                      value={autoFillDelay}
+                      onChange={(e) =>
+                        updateSetting("autoFillDelay", Number(e.target.value))
+                      }
+                      style={{
+                        background: "var(--bg-color)",
+                        color: "var(--text-main)",
+                        border: "1px solid var(--border-strong)",
+                        borderRadius: "6px",
+                        padding: "3px 8px",
+                        fontSize: "12px",
+                      }}
+                    >
+                      <option value={0}>Instant (0ms)</option>
+                      <option value={400}>Fast (400ms)</option>
+                      <option value={800}>Balanced (800ms)</option>
+                      <option value={1500}>Slow SPA (1.5s)</option>
+                      <option value={2500}>Heavy SPA (2.5s)</option>
+                    </select>
+                  </div>
+                )}
               </div>
               <ToggleButton
                 enabled={autoFillOnLoad}
                 onClick={() => updateSetting("autoFillOnLoad", !autoFillOnLoad)}
               />
+            </div>
+
+            <div className="settings-card glass">
+              <div className="flex-1">
+                <h4>Skip Already-Filled Fields</h4>
+                <p>
+                  Preserve values you have already typed instead of overwriting
+                  them.
+                </p>
+              </div>
+              <ToggleButton
+                enabled={skipFilledFields}
+                onClick={() =>
+                  updateSetting("skipFilledFields", !skipFilledFields)
+                }
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Privacy & Domain Exclusions */}
+        <section className="flex flex-col gap-4">
+          <h3 className="section-title">
+            <Lock size={18} color="var(--success)" /> Privacy &amp; Exclusions
+          </h3>
+          <div className="grid gap-4">
+            <div className="settings-card glass">
+              <div className="flex-1">
+                <h4>Exclude Password Fields</h4>
+                <p>
+                  Never record or autofill password inputs (recommended for
+                  security).
+                </p>
+              </div>
+              <ToggleButton
+                enabled={excludePasswords}
+                onClick={() =>
+                  updateSetting("excludePasswords", !excludePasswords)
+                }
+              />
+            </div>
+
+            <div className="card glass p-6 flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <Globe size={16} color="var(--accent)" />
+                <h4 style={{ fontSize: "15px", fontWeight: "600" }}>
+                  Excluded Domains
+                </h4>
+              </div>
+              <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                SmartForm Architect will stay completely inactive on these
+                domains (e.g. banking sites).
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newDomain}
+                  onChange={(e) => setNewDomain(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAddExcludedDomain();
+                  }}
+                  placeholder="e.g. bankofamerica.com"
+                  style={{
+                    flex: 1,
+                    background: "var(--bg-color)",
+                    border: "1px solid var(--border-strong)",
+                    borderRadius: "8px",
+                    padding: "8px 12px",
+                    color: "white",
+                    fontSize: "12px",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  className="btn btn-primary"
+                  onClick={handleAddExcludedDomain}
+                  style={{ padding: "6px 12px", fontSize: "12px" }}
+                >
+                  <Plus size={14} /> Add
+                </button>
+              </div>
+              {excludedDomains.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {excludedDomains.map((domain) => (
+                    <span
+                      key={domain}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        padding: "4px 10px",
+                        borderRadius: "999px",
+                        fontSize: "11px",
+                        background: "rgba(248, 81, 73, 0.12)",
+                        border: "1px solid rgba(248, 81, 73, 0.25)",
+                        color: "#ff7b72",
+                      }}
+                    >
+                      {domain}
+                      <button
+                        onClick={() => handleRemoveExcludedDomain(domain)}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "inherit",
+                          cursor: "pointer",
+                          padding: 0,
+                          display: "flex",
+                        }}
+                        aria-label={`Remove ${domain}`}
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -366,9 +588,9 @@ const Settings: React.FC<SettingsProps> = ({
                     color: "var(--text-muted)",
                   }}
                 >
-                  Pick a color that suits your style.
+                  Pick a preset or choose any custom hex color.
                 </p>
-                <div className="flex gap-4">
+                <div className="flex items-center gap-4">
                   {accents.map((acc) => (
                     <button
                       key={acc.color}
@@ -393,6 +615,35 @@ const Settings: React.FC<SettingsProps> = ({
                       title={acc.name}
                     />
                   ))}
+                  <label
+                    title="Custom Hex Color"
+                    style={{
+                      width: "36px",
+                      height: "36px",
+                      borderRadius: "50%",
+                      border: "2px dashed var(--border-strong)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      cursor: "pointer",
+                      overflow: "hidden",
+                      background: accentColor,
+                    }}
+                  >
+                    <input
+                      type="color"
+                      value={accentColor}
+                      onChange={(e) =>
+                        updateSetting("accentColor", e.target.value)
+                      }
+                      style={{
+                        opacity: 0,
+                        width: "100%",
+                        height: "100%",
+                        cursor: "pointer",
+                      }}
+                    />
+                  </label>
                 </div>
               </div>
             </div>
@@ -415,7 +666,7 @@ const Settings: React.FC<SettingsProps> = ({
                   Export Data
                 </span>
                 <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-                  Backup all templates
+                  Backup templates &amp; profiles
                 </span>
               </div>
             </button>
@@ -495,23 +746,19 @@ const Settings: React.FC<SettingsProps> = ({
                 color: "var(--text-muted)",
               }}
             >
-              The ultimate productivity tool for heavy form filers. Architect
-              your web experience with custom templates and universal profiles.
+              The ultimate productivity tool for heavy form fillers. Architect
+              your web experience with custom templates, dynamic tags, and
+              multi-profile personas.
             </p>
 
             <div className="flex gap-4 pt-2">
               <a
                 href="https://github.com"
                 target="_blank"
+                rel="noopener noreferrer"
                 className="flex items-center gap-2 text-sm text-accent hover:underline"
               >
                 <Github size={14} /> GitHub
-              </a>
-              <a
-                href="#"
-                className="flex items-center gap-2 text-sm text-accent hover:underline"
-              >
-                <ExternalLink size={14} /> Website
               </a>
             </div>
           </div>
@@ -548,7 +795,7 @@ const Settings: React.FC<SettingsProps> = ({
         .settings-card p {
           font-size: 12px;
           color: var(--text-muted);
-          max-width: 250px;
+          max-width: 260px;
         }
         .border-danger-dim {
           border-color: rgba(248, 81, 73, 0.2) !important;
@@ -556,9 +803,6 @@ const Settings: React.FC<SettingsProps> = ({
         .border-danger-dim:hover {
           border-color: var(--danger) !important;
           background: rgba(248, 81, 73, 0.05) !important;
-        }
-        .text-muted-opacity {
-          opacity: 0.6;
         }
       `}</style>
     </div>

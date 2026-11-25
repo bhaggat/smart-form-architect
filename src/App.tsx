@@ -9,19 +9,20 @@ import {
   Plus,
   Sparkles,
   Zap,
+  User,
+  Play,
 } from "lucide-react";
 import Settings from "./Settings";
 import ReviewPrompt from "./ReviewPrompt";
+import type { Profile, TemplatesMap } from "./types/storage";
+import {
+  applyAccentTheme,
+  resolveProfilesFromStorage,
+  safeHostname,
+} from "./utils/matching";
 
 function App() {
-  const appVersion = chrome?.runtime?.getManifest?.()?.version || "1.0.0";
-
-  useEffect(() => {
-    console.log(`[SmartForm] Extension opened. Version: ${appVersion}`);
-    return () => {
-      console.log("[SmartForm] Extension closed");
-    };
-  }, [appVersion]);
+  const appVersion = chrome?.runtime?.getManifest?.()?.version || "1.1.1";
 
   const [isDashboard, setIsDashboard] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -31,21 +32,38 @@ function App() {
   const [enablePerField, setEnablePerField] = useState(true);
   const [enablePerPage, setEnablePerPage] = useState(false);
   const [enableShortcut, setEnableShortcut] = useState(true);
+  const [profiles, setProfiles] = useState<Profile[]>([
+    { id: "default", name: "Personal", fields: [] },
+  ]);
+  const [activeProfileId, setActiveProfileId] = useState("default");
   const [recentTemplates, setRecentTemplates] = useState<
     { url: string; name?: string; count: number }[]
   >([]);
   const [saveStatus, setSaveStatus] = useState<
     "idle" | "saving" | "success" | "error"
   >("idle");
+  const [fillStatus, setFillStatus] = useState<"idle" | "filled">("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [activeView, setActiveView] = useState<"main" | "settings">("main");
+
+  const loadRecentTemplates = (templatesObj?: TemplatesMap) => {
+    if (!templatesObj) return;
+    const entries = Object.entries(templatesObj)
+      .sort((a, b) => (b[1]?.updatedAt || 0) - (a[1]?.updatedAt || 0))
+      .slice(0, 3)
+      .map(([url, tpl]) => ({
+        url,
+        name: tpl?.name,
+        count: tpl?.fields?.length || 0,
+      }));
+    setRecentTemplates(entries);
+  };
 
   useEffect(() => {
     if (isDashboard) return;
 
     document.body.className = "popup-view";
 
-    // Load state
     if (chrome && chrome.storage) {
       chrome.storage.local.get(
         [
@@ -54,23 +72,17 @@ function App() {
           "enablePerField",
           "enablePerPage",
           "enableShortcut",
+          "accentColor",
+          "profiles",
+          "activeProfileId",
+          "globalFields",
         ],
         (res) => {
           if (res.recordMode !== undefined) {
             setRecordMode(Boolean(res.recordMode));
           }
           if (res.templates) {
-            const templates = res.templates as Record<
-              string,
-              { fields: unknown[]; name?: string }
-            >;
-            const urls = Object.keys(templates).slice(-3).reverse();
-            const populated = urls.map((u) => ({
-              url: u,
-              name: templates[u]?.name,
-              count: templates[u]?.fields?.length || 0,
-            }));
-            setRecentTemplates(populated);
+            loadRecentTemplates(res.templates as TemplatesMap);
           }
           if (res.enablePerField !== undefined) {
             setEnablePerField(Boolean(res.enablePerField));
@@ -81,6 +93,18 @@ function App() {
           if (res.enableShortcut !== undefined) {
             setEnableShortcut(Boolean(res.enableShortcut));
           }
+          if (typeof res.accentColor === "string") {
+            applyAccentTheme(res.accentColor);
+          }
+          const resolved = resolveProfilesFromStorage(
+            res as {
+              profiles?: Profile[];
+              activeProfileId?: string;
+              globalFields?: Profile["fields"];
+            },
+          );
+          setProfiles(resolved.profiles);
+          setActiveProfileId(resolved.activeProfileId);
         },
       );
     }
@@ -88,13 +112,12 @@ function App() {
 
   const toggleRecordMode = () => {
     const newVal = !recordMode;
-    console.log(`[SmartForm] Toggling record mode to: ${newVal}`);
     if (chrome && chrome.storage) {
       chrome.storage.local.set({ recordMode: newVal }, () => {
         setRecordMode(newVal);
       });
     } else {
-      setRecordMode(newVal); // for dev outside extension
+      setRecordMode(newVal);
     }
   };
 
@@ -112,6 +135,17 @@ function App() {
     }
   };
 
+  const handleSwitchProfile = (profileId: string) => {
+    setActiveProfileId(profileId);
+    const chosen = profiles.find((p) => p.id === profileId);
+    if (chrome && chrome.storage) {
+      chrome.storage.local.set({
+        activeProfileId: profileId,
+        globalFields: chosen?.fields || [],
+      });
+    }
+  };
+
   const openDashboard = (url?: string) => {
     let target = "index.html?view=dashboard";
     if (url) target += `&url=${encodeURIComponent(url)}`;
@@ -125,8 +159,31 @@ function App() {
     }
   };
 
+  const runAutofillNow = () => {
+    if (chrome && chrome.tabs) {
+      setErrorMessage("");
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0] && tabs[0].id) {
+          chrome.tabs.sendMessage(
+            tabs[0].id,
+            { action: "runAutofill" },
+            () => {
+              if (chrome.runtime.lastError) {
+                setErrorMessage(
+                  "Content script not found. Please refresh the page.",
+                );
+                return;
+              }
+              setFillStatus("filled");
+              setTimeout(() => setFillStatus("idle"), 1500);
+            },
+          );
+        }
+      });
+    }
+  };
+
   const forceSaveForm = () => {
-    console.log("[SmartForm] forceSaveForm clicked");
     if (chrome && chrome.tabs) {
       setSaveStatus("saving");
       setErrorMessage("");
@@ -155,21 +212,10 @@ function App() {
                 setSaveStatus("success");
                 setTimeout(() => setSaveStatus("idle"), 2000);
               }
-              // Refresh recent templates
               setTimeout(() => {
                 chrome.storage.local.get(["templates"], (res) => {
                   if (res.templates) {
-                    const templates = res.templates as Record<
-                      string,
-                      { fields: unknown[]; name?: string }
-                    >;
-                    const urls = Object.keys(templates).slice(-3).reverse();
-                    const populated = urls.map((u) => ({
-                      url: u,
-                      name: templates[u]?.name,
-                      count: templates[u]?.fields?.length || 0,
-                    }));
-                    setRecentTemplates(populated);
+                    loadRecentTemplates(res.templates as TemplatesMap);
                   }
                 });
               }, 300);
@@ -273,6 +319,40 @@ function App() {
 
       {/* Main Content */}
       <div className="flex flex-col gap-4" style={{ flex: 1 }}>
+        {/* Active Profile Switcher */}
+        <div
+          className="card glass flex items-center justify-between"
+          style={{ padding: "10px 14px" }}
+        >
+          <div className="flex items-center gap-2">
+            <User size={15} color="var(--accent)" />
+            <span style={{ fontSize: "12px", fontWeight: 600, color: "#fff" }}>
+              Active Profile
+            </span>
+          </div>
+          <select
+            value={activeProfileId}
+            onChange={(e) => handleSwitchProfile(e.target.value)}
+            style={{
+              background: "var(--bg-color)",
+              color: "var(--text-main)",
+              border: "1px solid var(--border-strong)",
+              borderRadius: "6px",
+              padding: "4px 8px",
+              fontSize: "11px",
+              fontWeight: 600,
+              outline: "none",
+              cursor: "pointer",
+            }}
+          >
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.fields.length})
+              </option>
+            ))}
+          </select>
+        </div>
+
         {/* Record Mode Card */}
         <div className="card glass">
           <div className="flex items-center justify-between">
@@ -417,29 +497,44 @@ function App() {
             >
               Recent Templates
             </h2>
-            <button
-              onClick={forceSaveForm}
-              disabled={saveStatus === "saving" || saveStatus === "success"}
-              className={`btn btn-primary ${saveStatus === "success" ? "btn-success" : ""}`}
-              style={{
-                padding: "4px 10px",
-                fontSize: "11px",
-                borderRadius: "6px",
-              }}
-              title="Saves ALL forms currently visible on this webpage."
-            >
-              {saveStatus === "saving" ? (
-                "Saving..."
-              ) : saveStatus === "success" ? (
-                <>
-                  <Zap size={12} /> Saved!
-                </>
-              ) : (
-                <>
-                  <Plus size={12} /> Save Current
-                </>
-              )}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={runAutofillNow}
+                className={`btn ${fillStatus === "filled" ? "btn-success" : ""}`}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "11px",
+                  borderRadius: "6px",
+                }}
+                title="Autofill the current page now"
+              >
+                <Play size={11} />{" "}
+                {fillStatus === "filled" ? "Filled!" : "Autofill"}
+              </button>
+              <button
+                onClick={forceSaveForm}
+                disabled={saveStatus === "saving" || saveStatus === "success"}
+                className={`btn btn-primary ${saveStatus === "success" ? "btn-success" : ""}`}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "11px",
+                  borderRadius: "6px",
+                }}
+                title="Saves ALL forms currently visible on this webpage."
+              >
+                {saveStatus === "saving" ? (
+                  "Saving..."
+                ) : saveStatus === "success" ? (
+                  <>
+                    <Zap size={12} /> Saved!
+                  </>
+                ) : (
+                  <>
+                    <Plus size={12} /> Save Current
+                  </>
+                )}
+              </button>
+            </div>
           </div>
 
           {errorMessage && (
@@ -460,12 +555,7 @@ function App() {
           <div className="flex flex-col gap-2">
             {recentTemplates.length > 0 ? (
               recentTemplates.map((template, idx) => {
-                let hostname = template.url;
-                try {
-                  hostname = new URL(template.url).hostname;
-                } catch {
-                  // Fallback if not a valid URL
-                }
+                const hostname = safeHostname(template.url);
                 return (
                   <div
                     key={idx}

@@ -14,58 +14,101 @@ import {
   Zap,
   HelpCircle,
   Settings as SettingsIcon,
+  Copy,
+  User,
+  Tag,
 } from "lucide-react";
 import Settings from "./Settings";
+import type {
+  FormField,
+  MatchMode,
+  Profile,
+  TemplatesMap,
+} from "./types/storage";
+import { DYNAMIC_TAGS } from "./utils/tags";
+import {
+  applyAccentTheme,
+  resolveProfilesFromStorage,
+  safeHostname,
+} from "./utils/matching";
 
-interface FormField {
-  id: string;
-  name: string;
-  placeholder: string;
-  type: string;
-  value: string;
-}
-
-interface Templates {
-  [url: string]: {
-    url: string;
-    name?: string;
-    fields: FormField[];
-  };
-}
+const FIELD_TYPES = [
+  "text",
+  "email",
+  "tel",
+  "url",
+  "number",
+  "date",
+  "select",
+  "checkbox",
+];
 
 const Dashboard = () => {
-  const [templates, setTemplates] = useState<Templates>({});
+  const [templates, setTemplates] = useState<TemplatesMap>({});
   const [selectedUrl, setSelectedUrl] = useState<string | null>(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get("url");
   });
   const [editFields, setEditFields] = useState<FormField[]>([]);
-  const [globalFields, setGlobalFields] = useState<FormField[]>([]);
+  const [templateName, setTemplateName] = useState("");
+  const [templateMatchMode, setTemplateMatchMode] =
+    useState<MatchMode>("exact");
+  const [templateCategory, setTemplateCategory] = useState("");
+
+  const [profiles, setProfiles] = useState<Profile[]>([
+    { id: "default", name: "Personal", fields: [] },
+  ]);
+  const [activeProfileId, setActiveProfileId] = useState("default");
+  const [editingProfileId, setEditingProfileId] = useState("default");
+
   const [activeTab, setActiveTab] = useState<
     "templates" | "global" | "help" | "settings"
   >("templates");
   const [searchQuery, setSearchQuery] = useState("");
-  const [templateName, setTemplateName] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
 
-  const loadTemplates = () => {
+  const loadStorageData = () => {
     if (chrome && chrome.storage) {
-      chrome.storage.local.get(["templates", "globalFields"], (res) => {
-        if (res.templates) setTemplates(res.templates as Templates);
-        if (res.globalFields) setGlobalFields(res.globalFields as FormField[]);
-      });
+      chrome.storage.local.get(
+        [
+          "templates",
+          "globalFields",
+          "profiles",
+          "activeProfileId",
+          "accentColor",
+        ],
+        (res) => {
+          if (res.templates) setTemplates(res.templates as TemplatesMap);
+          if (typeof res.accentColor === "string") {
+            applyAccentTheme(res.accentColor);
+          }
+          const resolved = resolveProfilesFromStorage(
+            res as {
+              profiles?: Profile[];
+              activeProfileId?: string;
+              globalFields?: FormField[];
+            },
+          );
+          setProfiles(resolved.profiles);
+          setActiveProfileId(resolved.activeProfileId);
+          setEditingProfileId(resolved.activeProfileId);
+        },
+      );
     }
   };
 
   useEffect(() => {
     document.body.className = "dashboard-view";
-    loadTemplates();
+    loadStorageData();
 
     if (selectedUrl && chrome && chrome.storage) {
       chrome.storage.local.get("templates", (res) => {
-        const templatesData = (res.templates || {}) as Templates;
+        const templatesData = (res.templates || {}) as TemplatesMap;
         if (templatesData[selectedUrl]) {
           setEditFields(templatesData[selectedUrl].fields || []);
           setTemplateName(templatesData[selectedUrl].name || "");
+          setTemplateMatchMode(templatesData[selectedUrl].matchMode || "exact");
+          setTemplateCategory(templatesData[selectedUrl].category || "");
         }
       });
     }
@@ -76,47 +119,161 @@ const Dashboard = () => {
     const template = templates[url];
     setEditFields(template?.fields || []);
     setTemplateName(template?.name || "");
+    setTemplateMatchMode(template?.matchMode || "exact");
+    setTemplateCategory(template?.category || "");
+  };
+
+  const flashButton = (id: string) => {
+    const btn = document.getElementById(id);
+    if (btn) {
+      const original = btn.innerText;
+      btn.innerText = "Saved!";
+      btn.classList.add("btn-success");
+      setTimeout(() => {
+        btn.innerText = original;
+        btn.classList.remove("btn-success");
+      }, 2000);
+    }
   };
 
   const handleSaveFields = () => {
     if (!selectedUrl) return;
-    const newTemplates = { ...templates };
-    newTemplates[selectedUrl].fields = editFields;
-    newTemplates[selectedUrl].name = templateName;
+    const newTemplates: TemplatesMap = { ...templates };
+    newTemplates[selectedUrl] = {
+      ...newTemplates[selectedUrl],
+      url: selectedUrl,
+      fields: editFields,
+      name: templateName,
+      matchMode: templateMatchMode,
+      category: templateCategory.trim(),
+      updatedAt: Date.now(),
+    };
 
     if (chrome && chrome.storage) {
       chrome.storage.local.set({ templates: newTemplates }, () => {
         setTemplates(newTemplates);
-        // Better feedback than alert
-        const btn = document.getElementById("save-template-btn");
-        if (btn) {
-          const original = btn.innerText;
-          btn.innerText = "Saved!";
-          btn.classList.add("btn-success");
-          setTimeout(() => {
-            btn.innerText = original;
-            btn.classList.remove("btn-success");
-          }, 2000);
-        }
+        flashButton("save-template-btn");
       });
     }
   };
 
-  const handleSaveGlobalFields = () => {
+  const handleCreateTemplate = () => {
+    const rawUrl = prompt(
+      "Enter the target URL (e.g. https://example.com/signup):",
+    );
+    if (!rawUrl || !rawUrl.trim()) return;
+    const cleanUrl = rawUrl.trim();
+    if (templates[cleanUrl]) {
+      handleSelectUrl(cleanUrl);
+      return;
+    }
+    const newTpl = {
+      url: cleanUrl,
+      name: safeHostname(cleanUrl),
+      matchMode: "exact" as MatchMode,
+      category: "",
+      updatedAt: Date.now(),
+      fields: [],
+    };
+    const updated = { ...templates, [cleanUrl]: newTpl };
     if (chrome && chrome.storage) {
-      chrome.storage.local.set({ globalFields }, () => {
-        const btn = document.getElementById("save-global-btn");
-        if (btn) {
-          const original = btn.innerText;
-          btn.innerText = "Saved!";
-          btn.classList.add("btn-success");
-          setTimeout(() => {
-            btn.innerText = original;
-            btn.classList.remove("btn-success");
-          }, 2000);
-        }
+      chrome.storage.local.set({ templates: updated }, () => {
+        setTemplates(updated);
+        handleSelectUrl(cleanUrl);
+      });
+    } else {
+      setTemplates(updated);
+      handleSelectUrl(cleanUrl);
+    }
+  };
+
+  const handleDuplicateTemplate = () => {
+    if (!selectedUrl || !templates[selectedUrl]) return;
+    const newUrl = prompt(
+      "Enter URL key for the duplicated template:",
+      `${selectedUrl}-copy`,
+    );
+    if (!newUrl || !newUrl.trim()) return;
+    const key = newUrl.trim();
+    const copy = {
+      ...templates[selectedUrl],
+      url: key,
+      name: `${templateName || safeHostname(selectedUrl)} (Copy)`,
+      fields: editFields.map((f) => ({ ...f, id: `${f.id}-${Date.now()}` })),
+      updatedAt: Date.now(),
+    };
+    const updated = { ...templates, [key]: copy };
+    if (chrome && chrome.storage) {
+      chrome.storage.local.set({ templates: updated }, () => {
+        setTemplates(updated);
+        handleSelectUrl(key);
       });
     }
+  };
+
+  const currentEditingProfile = useMemo(
+    () => profiles.find((p) => p.id === editingProfileId) || profiles[0],
+    [profiles, editingProfileId],
+  );
+
+  const persistProfiles = (
+    nextProfiles: Profile[],
+    nextActiveId = activeProfileId,
+  ) => {
+    setProfiles(nextProfiles);
+    setActiveProfileId(nextActiveId);
+    const activeObj =
+      nextProfiles.find((p) => p.id === nextActiveId) || nextProfiles[0];
+    if (chrome && chrome.storage) {
+      chrome.storage.local.set(
+        {
+          profiles: nextProfiles,
+          activeProfileId: nextActiveId,
+          globalFields: activeObj?.fields || [],
+        },
+        () => flashButton("save-global-btn"),
+      );
+    }
+  };
+
+  const handleCreateProfile = () => {
+    const name = prompt("New Profile Name (e.g. Work, QA Testing, Client):");
+    if (!name || !name.trim()) return;
+    const newProfile: Profile = {
+      id: `profile-${Date.now()}`,
+      name: name.trim(),
+      fields: [],
+    };
+    const next = [...profiles, newProfile];
+    setEditingProfileId(newProfile.id);
+    persistProfiles(next, activeProfileId);
+  };
+
+  const handleRenameProfile = (id: string) => {
+    const target = profiles.find((p) => p.id === id);
+    if (!target) return;
+    const nextName = prompt("Rename profile:", target.name);
+    if (!nextName || !nextName.trim()) return;
+    const next = profiles.map((p) =>
+      p.id === id ? { ...p, name: nextName.trim() } : p,
+    );
+    persistProfiles(next, activeProfileId);
+  };
+
+  const handleDeleteProfile = (id: string) => {
+    if (profiles.length <= 1) {
+      alert("You must keep at least one profile.");
+      return;
+    }
+    if (!confirm("Delete this profile and all its fields?")) return;
+    const next = profiles.filter((p) => p.id !== id);
+    const nextActive = activeProfileId === id ? next[0].id : activeProfileId;
+    if (editingProfileId === id) setEditingProfileId(next[0].id);
+    persistProfiles(next, nextActive);
+  };
+
+  const handleSaveGlobalFields = () => {
+    persistProfiles(profiles, activeProfileId);
   };
 
   const handleCreateCustomField = () => {
@@ -133,16 +290,24 @@ const Dashboard = () => {
   };
 
   const handleCreateGlobalField = () => {
-    setGlobalFields([
-      ...globalFields,
-      {
-        id: "global-" + Date.now(),
-        name: "New Global Field",
-        placeholder: "Label lookup",
-        type: "text",
-        value: "",
-      },
-    ]);
+    const next = profiles.map((p) =>
+      p.id === currentEditingProfile.id
+        ? {
+            ...p,
+            fields: [
+              ...p.fields,
+              {
+                id: "global-" + Date.now(),
+                name: "New Global Field",
+                placeholder: "Label lookup",
+                type: "text",
+                value: "",
+              },
+            ],
+          }
+        : p,
+    );
+    setProfiles(next);
   };
 
   const handleDeleteUrl = (url: string) => {
@@ -166,31 +331,37 @@ const Dashboard = () => {
   };
 
   const handleDeleteGlobalField = (idx: number) => {
-    const updated = [...globalFields];
-    updated.splice(idx, 1);
-    setGlobalFields(updated);
+    const next = profiles.map((p) => {
+      if (p.id !== currentEditingProfile.id) return p;
+      const updated = [...p.fields];
+      updated.splice(idx, 1);
+      return { ...p, fields: updated };
+    });
+    setProfiles(next);
   };
 
-  const updateFieldValue = (index: number, val: string) => {
+  const updateFieldProp = (
+    index: number,
+    key: keyof FormField,
+    val: string,
+  ) => {
     const updated = [...editFields];
-    updated[index].value = val;
-    setEditFields(updated);
-  };
-
-  const updateFieldName = (index: number, name: string) => {
-    const updated = [...editFields];
-    updated[index].name = name;
+    updated[index] = { ...updated[index], [key]: val };
     setEditFields(updated);
   };
 
   const updateGlobalField = (
     index: number,
-    key: "name" | "value",
+    key: keyof FormField,
     val: string,
   ) => {
-    const updated = [...globalFields];
-    updated[index][key] = val;
-    setGlobalFields(updated);
+    const next = profiles.map((p) => {
+      if (p.id !== currentEditingProfile.id) return p;
+      const updated = [...p.fields];
+      updated[index] = { ...updated[index], [key]: val };
+      return { ...p, fields: updated };
+    });
+    setProfiles(next);
   };
 
   const handleExport = () => {
@@ -199,7 +370,7 @@ const Dashboard = () => {
       encodeURIComponent(JSON.stringify(templates, null, 2));
     const dlAnchorElem = document.createElement("a");
     dlAnchorElem.setAttribute("href", dataStr);
-    dlAnchorElem.setAttribute("download", "smartform-architect-v1.json");
+    dlAnchorElem.setAttribute("download", "smartform-architect-templates.json");
     dlAnchorElem.click();
   };
 
@@ -213,7 +384,7 @@ const Dashboard = () => {
         if (chrome && chrome.storage) {
           chrome.storage.local.get(
             "templates",
-            (res: { templates?: Templates }) => {
+            (res: { templates?: TemplatesMap }) => {
               const existing = res.templates || {};
               const merged = { ...existing, ...json };
               chrome.storage.local.set({ templates: merged }, () => {
@@ -231,21 +402,44 @@ const Dashboard = () => {
 
   const injectTag = (index: number, tag: string, isGlobal = false) => {
     if (isGlobal) {
-      const updated = [...globalFields];
-      updated[index].value = updated[index].value + tag;
-      setGlobalFields(updated);
+      const targetField = currentEditingProfile.fields[index];
+      updateGlobalField(index, "value", (targetField?.value || "") + tag);
     } else {
       const updated = [...editFields];
-      updated[index].value = updated[index].value + tag;
+      updated[index] = {
+        ...updated[index],
+        value: (updated[index].value || "") + tag,
+      };
       setEditFields(updated);
     }
   };
 
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    Object.values(templates).forEach((t) => {
+      if (t.category && t.category.trim()) set.add(t.category.trim());
+    });
+    return Array.from(set).sort();
+  }, [templates]);
+
   const filteredTemplates = useMemo(() => {
-    return Object.keys(templates).filter((url) =>
-      url.toLowerCase().includes(searchQuery.toLowerCase()),
-    );
-  }, [templates, searchQuery]);
+    const q = searchQuery.toLowerCase();
+    return Object.keys(templates).filter((url) => {
+      const tpl = templates[url];
+      if (
+        categoryFilter !== "all" &&
+        (tpl.category || "").trim() !== categoryFilter
+      ) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        url.toLowerCase().includes(q) ||
+        (tpl?.name || "").toLowerCase().includes(q) ||
+        (tpl?.category || "").toLowerCase().includes(q)
+      );
+    });
+  }, [templates, searchQuery, categoryFilter]);
 
   return (
     <div
@@ -315,8 +509,8 @@ const Dashboard = () => {
               className={`nav-btn ${activeTab === "global" ? "active" : ""}`}
               onClick={() => setActiveTab("global")}
             >
-              <Sparkles size={18} />
-              <span>Global Fields</span>
+              <User size={18} />
+              <span>Profiles &amp; Global Fields</span>
               <ChevronRight size={14} className="ml-auto opacity-40" />
             </button>
             <button
@@ -341,32 +535,71 @@ const Dashboard = () => {
         <div style={{ flex: 1, padding: "0 12px 24px", overflowY: "auto" }}>
           {activeTab === "templates" && (
             <div className="animate-fade-in">
-              <div style={{ position: "relative", padding: "0 12px 16px" }}>
-                <Search
-                  size={14}
-                  style={{
-                    position: "absolute",
-                    left: "24px",
-                    top: "10px",
-                    color: "var(--text-muted)",
-                  }}
-                />
-                <input
-                  type="text"
-                  placeholder="Filter templates..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "8px 12px 8px 32px",
-                    backgroundColor: "var(--panel-bg-solid)",
-                    border: "1px solid var(--border-strong)",
-                    borderRadius: "8px",
-                    fontSize: "13px",
-                    color: "white",
-                    outline: "none",
-                  }}
-                />
+              <div
+                className="flex flex-col gap-2"
+                style={{ padding: "0 12px 16px" }}
+              >
+                <div className="flex gap-2">
+                  <div style={{ position: "relative", flex: 1 }}>
+                    <Search
+                      size={14}
+                      style={{
+                        position: "absolute",
+                        left: "12px",
+                        top: "10px",
+                        color: "var(--text-muted)",
+                      }}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Filter name, URL..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      style={{
+                        width: "100%",
+                        padding: "8px 12px 8px 32px",
+                        backgroundColor: "var(--panel-bg-solid)",
+                        border: "1px solid var(--border-strong)",
+                        borderRadius: "8px",
+                        fontSize: "13px",
+                        color: "white",
+                        outline: "none",
+                      }}
+                    />
+                  </div>
+                  <button
+                    onClick={handleCreateTemplate}
+                    className="btn btn-primary"
+                    title="Create new template"
+                    style={{ padding: "8px 10px" }}
+                  >
+                    <Plus size={15} />
+                  </button>
+                </div>
+
+                {categories.length > 0 && (
+                  <select
+                    value={categoryFilter}
+                    onChange={(e) => setCategoryFilter(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: "6px 10px",
+                      backgroundColor: "var(--panel-bg-solid)",
+                      border: "1px solid var(--border-strong)",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                      color: "var(--text-muted)",
+                      outline: "none",
+                    }}
+                  >
+                    <option value="all">All Categories</option>
+                    {categories.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               {filteredTemplates.length === 0 ? (
@@ -393,12 +626,26 @@ const Dashboard = () => {
                       onClick={() => handleSelectUrl(url)}
                     >
                       <LinkIcon size={14} className="flex-shrink-0" />
-                      <span
-                        className="truncate flex-1"
-                        title={templates[url]?.name || url}
-                      >
-                        {templates[url]?.name || new URL(url).hostname}
-                      </span>
+                      <div className="flex flex-col flex-1 overflow-hidden">
+                        <span
+                          className="truncate"
+                          title={templates[url]?.name || url}
+                        >
+                          {templates[url]?.name || safeHostname(url)}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: "10px",
+                            color: "var(--text-muted)",
+                          }}
+                        >
+                          {templates[url]?.fields?.length || 0} fields
+                          {templates[url]?.matchMode &&
+                          templates[url]?.matchMode !== "exact"
+                            ? ` • ${templates[url].matchMode}`
+                            : ""}
+                        </span>
+                      </div>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -416,7 +663,7 @@ const Dashboard = () => {
           )}
 
           {activeTab === "global" && (
-            <div className="p-4 animate-fade-in">
+            <div className="p-4 animate-fade-in flex flex-col gap-3">
               <div
                 className="card"
                 style={{
@@ -432,12 +679,10 @@ const Dashboard = () => {
                     color: "var(--text-muted)",
                   }}
                 >
-                  Global fields are your{" "}
-                  <strong style={{ color: "var(--accent)" }}>
-                    Master Profile
-                  </strong>
-                  . They apply to all forms on all websites when matched
-                  semantically.
+                  Create multiple{" "}
+                  <strong style={{ color: "var(--accent)" }}>Profiles</strong>{" "}
+                  (Personal, Work, QA) and switch between them anytime from the
+                  popup.
                 </p>
               </div>
             </div>
@@ -469,7 +714,7 @@ const Dashboard = () => {
                   <br />
                   2. Submit any form on the web.
                   <br />
-                  3. The extension captures it as a template here!
+                  3. Refine fields, match modes, and dynamic tags here!
                 </p>
               </div>
             </div>
@@ -508,43 +753,102 @@ const Dashboard = () => {
           {activeTab === "templates" && selectedUrl ? (
             <div className="animate-fade-in">
               <header
-                className="flex justify-between items-end mb-10 pb-8 border-bottom"
+                className="flex flex-col gap-6 mb-10 pb-8 border-bottom"
                 style={{ borderBottom: "1px solid var(--border)" }}
               >
-                <div>
-                  <input
-                    type="text"
-                    value={templateName}
-                    onChange={(e) => setTemplateName(e.target.value)}
-                    placeholder="Enter template name..."
-                    className="transparent-input"
-                    style={{
-                      fontSize: "32px",
-                      fontWeight: "700",
-                      letterSpacing: "-0.03em",
-                      marginBottom: "8px",
-                      width: "100%",
-                      color: "white",
-                    }}
-                  />
-                  <div className="flex items-center gap-2 text-accent">
-                    <LinkIcon size={14} />
-                    <span style={{ fontSize: "14px", opacity: 0.8 }}>
-                      {selectedUrl}
-                    </span>
+                <div className="flex justify-between items-end gap-4">
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      value={templateName}
+                      onChange={(e) => setTemplateName(e.target.value)}
+                      placeholder="Enter template name..."
+                      className="transparent-input"
+                      style={{
+                        fontSize: "32px",
+                        fontWeight: "700",
+                        letterSpacing: "-0.03em",
+                        marginBottom: "8px",
+                        width: "100%",
+                        color: "white",
+                      }}
+                    />
+                    <div className="flex items-center gap-2 text-accent">
+                      <LinkIcon size={14} />
+                      <span style={{ fontSize: "14px", opacity: 0.8 }}>
+                        {selectedUrl}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      className="btn"
+                      onClick={handleDuplicateTemplate}
+                      title="Duplicate template"
+                    >
+                      <Copy size={15} /> Duplicate
+                    </button>
+                    <button className="btn" onClick={handleCreateCustomField}>
+                      <Plus size={16} /> Add Field
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      id="save-template-btn"
+                      onClick={handleSaveFields}
+                    >
+                      <Save size={16} /> Save Changes
+                    </button>
                   </div>
                 </div>
-                <div className="flex gap-3">
-                  <button className="btn" onClick={handleCreateCustomField}>
-                    <Plus size={16} /> Add Field
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    id="save-template-btn"
-                    onClick={handleSaveFields}
-                  >
-                    <Save size={16} /> Save Changes
-                  </button>
+
+                {/* Template Match Mode & Category */}
+                <div className="flex gap-4">
+                  <div className="flex items-center gap-2">
+                    <span
+                      style={{ fontSize: "12px", color: "var(--text-muted)" }}
+                    >
+                      Match Mode:
+                    </span>
+                    <select
+                      value={templateMatchMode}
+                      onChange={(e) =>
+                        setTemplateMatchMode(e.target.value as MatchMode)
+                      }
+                      style={{
+                        background: "var(--panel-bg-solid)",
+                        color: "white",
+                        border: "1px solid var(--border-strong)",
+                        borderRadius: "8px",
+                        padding: "6px 10px",
+                        fontSize: "12px",
+                        outline: "none",
+                      }}
+                    >
+                      <option value="exact">Exact URL Path</option>
+                      <option value="domain">Entire Domain</option>
+                      <option value="prefix">URL Prefix / Wildcard</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Tag size={14} color="var(--text-muted)" />
+                    <input
+                      type="text"
+                      value={templateCategory}
+                      onChange={(e) => setTemplateCategory(e.target.value)}
+                      placeholder="Category (e.g. Auth, Billing)"
+                      style={{
+                        background: "var(--panel-bg-solid)",
+                        color: "white",
+                        border: "1px solid var(--border-strong)",
+                        borderRadius: "8px",
+                        padding: "6px 10px",
+                        fontSize: "12px",
+                        outline: "none",
+                        width: "200px",
+                      }}
+                    />
+                  </div>
                 </div>
               </header>
 
@@ -554,16 +858,16 @@ const Dashboard = () => {
                     <div
                       key={field.id || idx}
                       className="field-card animate-slide-in"
-                      style={{ animationDelay: `${idx * 0.05}s` }}
+                      style={{ animationDelay: `${idx * 0.03}s` }}
                     >
-                      <div className="flex justify-between items-center mb-4">
+                      <div className="flex justify-between items-center mb-4 gap-3">
                         <div className="flex items-center gap-2 flex-1">
                           <Type size={16} color="var(--accent)" />
                           <input
                             type="text"
                             value={field.name}
                             onChange={(e) =>
-                              updateFieldName(idx, e.target.value)
+                              updateFieldProp(idx, "name", e.target.value)
                             }
                             placeholder="Field Name (used for matching labels)"
                             className="transparent-input"
@@ -571,9 +875,28 @@ const Dashboard = () => {
                           />
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className="badge badge-accent">
-                            Type: {field.type}
-                          </span>
+                          <select
+                            value={field.type || "text"}
+                            onChange={(e) =>
+                              updateFieldProp(idx, "type", e.target.value)
+                            }
+                            style={{
+                              background: "var(--bg-color)",
+                              color: "var(--accent)",
+                              border: "1px solid var(--border-strong)",
+                              borderRadius: "6px",
+                              padding: "4px 8px",
+                              fontSize: "11px",
+                              fontWeight: 600,
+                              outline: "none",
+                            }}
+                          >
+                            {FIELD_TYPES.map((t) => (
+                              <option key={t} value={t}>
+                                {t}
+                              </option>
+                            ))}
+                          </select>
                           <button
                             onClick={() => handleDeleteField(idx)}
                             className="delete-btn"
@@ -583,42 +906,44 @@ const Dashboard = () => {
                         </div>
                       </div>
 
-                      <div className="flex flex-col gap-2">
-                        <div className="flex justify-between">
-                          <label
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--text-muted)",
-                              fontWeight: "500",
-                            }}
-                          >
-                            Value / Template Tag
-                          </label>
-                        </div>
+                      <div className="flex flex-col gap-3">
                         <div className="flex gap-3">
                           <input
                             type="text"
                             value={field.value}
                             onChange={(e) =>
-                              updateFieldValue(idx, e.target.value)
+                              updateFieldProp(idx, "value", e.target.value)
                             }
-                            placeholder="Static value or dyn-tags..."
+                            placeholder="Static value or dynamic tags..."
                             className="styled-input"
                           />
-                          <button
-                            className="tag-btn"
-                            onClick={() => injectTag(idx, "{{timestamp}}")}
-                            title="Insert current timestamp"
-                          >
-                            <Plus size={14} /> ts
-                          </button>
-                          <button
-                            className="tag-btn"
-                            onClick={() => injectTag(idx, "{{autoIncrement}}")}
-                            title="Insert auto-incrementing number"
-                          >
-                            <Plus size={14} /> inc
-                          </button>
+                          <input
+                            type="text"
+                            value={field.placeholder || ""}
+                            onChange={(e) =>
+                              updateFieldProp(
+                                idx,
+                                "placeholder",
+                                e.target.value,
+                              )
+                            }
+                            placeholder="Placeholder hint (optional)"
+                            className="styled-input"
+                            style={{ maxWidth: "220px", fontSize: "12px" }}
+                          />
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {DYNAMIC_TAGS.map((dt) => (
+                            <button
+                              key={dt.tag}
+                              className="tag-btn"
+                              style={{ padding: "4px 10px" }}
+                              onClick={() => injectTag(idx, dt.tag)}
+                              title={`${dt.label}: ${dt.description}`}
+                            >
+                              <Plus size={12} /> {dt.shortLabel}
+                            </button>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -650,8 +975,8 @@ const Dashboard = () => {
                         margin: "0 auto",
                       }}
                     >
-                      This template was captured without any detected fields.
-                      You can manually add fields or try recording again.
+                      You can manually add fields below or record a submission
+                      on the target page.
                     </p>
                     <button
                       className="btn btn-primary"
@@ -667,7 +992,7 @@ const Dashboard = () => {
           ) : activeTab === "global" ? (
             <div className="animate-fade-in">
               <header
-                className="flex justify-between items-end mb-10 pb-8 border-bottom"
+                className="flex justify-between items-end mb-8 pb-6 border-bottom"
                 style={{ borderBottom: "1px solid var(--border)" }}
               >
                 <div>
@@ -679,7 +1004,7 @@ const Dashboard = () => {
                       marginBottom: "8px",
                     }}
                   >
-                    Global Fields
+                    Profiles &amp; Global Fields
                   </h2>
                   <p style={{ color: "var(--text-muted)", fontSize: "15px" }}>
                     Universal values applied across all forms based on semantic
@@ -687,8 +1012,11 @@ const Dashboard = () => {
                   </p>
                 </div>
                 <div className="flex gap-3">
+                  <button className="btn" onClick={handleCreateProfile}>
+                    <Plus size={16} /> New Profile
+                  </button>
                   <button className="btn" onClick={handleCreateGlobalField}>
-                    <Plus size={16} /> Add Global Field
+                    <Plus size={16} /> Add Field
                   </button>
                   <button
                     className="btn btn-primary"
@@ -700,13 +1028,84 @@ const Dashboard = () => {
                 </div>
               </header>
 
+              {/* Profile Selector Pills */}
+              <div className="flex flex-wrap items-center gap-3 mb-8">
+                {profiles.map((profile) => {
+                  const isEditing = profile.id === currentEditingProfile.id;
+                  const isActive = profile.id === activeProfileId;
+                  return (
+                    <div
+                      key={profile.id}
+                      onClick={() => setEditingProfileId(profile.id)}
+                      className={`card flex items-center gap-2 cursor-pointer`}
+                      style={{
+                        padding: "8px 14px",
+                        borderColor: isEditing
+                          ? "var(--accent)"
+                          : "var(--border)",
+                        background: isEditing
+                          ? "rgba(88, 166, 255, 0.1)"
+                          : "var(--panel-bg-solid)",
+                      }}
+                    >
+                      <User size={14} color="var(--accent)" />
+                      <span style={{ fontSize: "13px", fontWeight: 600 }}>
+                        {profile.name}
+                      </span>
+                      {isActive && (
+                        <span className="badge badge-success">Active</span>
+                      )}
+                      {!isActive && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            persistProfiles(profiles, profile.id);
+                          }}
+                          className="badge badge-accent"
+                          style={{ border: "none", cursor: "pointer" }}
+                        >
+                          Use
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRenameProfile(profile.id);
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "var(--text-muted)",
+                          fontSize: "11px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Rename
+                      </button>
+                      {profiles.length > 1 && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteProfile(profile.id);
+                          }}
+                          className="delete-btn"
+                          style={{ padding: "2px" }}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
               <div className="flex flex-col gap-6">
-                {globalFields.length > 0 ? (
-                  globalFields.map((field, idx) => (
+                {currentEditingProfile.fields.length > 0 ? (
+                  currentEditingProfile.fields.map((field, idx) => (
                     <div
                       key={field.id || idx}
                       className="field-card animate-slide-in"
-                      style={{ animationDelay: `${idx * 0.05}s` }}
+                      style={{ animationDelay: `${idx * 0.03}s` }}
                     >
                       <div className="flex justify-between items-center mb-4">
                         <div className="flex items-center gap-2 flex-1">
@@ -717,7 +1116,7 @@ const Dashboard = () => {
                             onChange={(e) =>
                               updateGlobalField(idx, "name", e.target.value)
                             }
-                            placeholder="e.g. phone, country, zip_code"
+                            placeholder="e.g. phone, country, zip_code, email"
                             className="transparent-input"
                             style={{ fontWeight: "600", fontSize: "15px" }}
                           />
@@ -730,41 +1129,28 @@ const Dashboard = () => {
                         </button>
                       </div>
 
-                      <div className="flex flex-col gap-2">
-                        <label
-                          style={{
-                            fontSize: "12px",
-                            color: "var(--text-muted)",
-                            fontWeight: "500",
-                          }}
-                        >
-                          Universal Value
-                        </label>
-                        <div className="flex gap-3">
-                          <input
-                            type="text"
-                            value={field.value}
-                            onChange={(e) =>
-                              updateGlobalField(idx, "value", e.target.value)
-                            }
-                            className="styled-input"
-                          />
-                          <button
-                            className="tag-btn"
-                            onClick={() =>
-                              injectTag(idx, "{{timestamp}}", true)
-                            }
-                          >
-                            <Plus size={14} /> ts
-                          </button>
-                          <button
-                            className="tag-btn"
-                            onClick={() =>
-                              injectTag(idx, "{{autoIncrement}}", true)
-                            }
-                          >
-                            <Plus size={14} /> inc
-                          </button>
+                      <div className="flex flex-col gap-3">
+                        <input
+                          type="text"
+                          value={field.value}
+                          onChange={(e) =>
+                            updateGlobalField(idx, "value", e.target.value)
+                          }
+                          placeholder="Universal value or dynamic tags..."
+                          className="styled-input"
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          {DYNAMIC_TAGS.map((dt) => (
+                            <button
+                              key={dt.tag}
+                              className="tag-btn"
+                              style={{ padding: "4px 10px" }}
+                              onClick={() => injectTag(idx, dt.tag, true)}
+                              title={`${dt.label}: ${dt.description}`}
+                            >
+                              <Plus size={12} /> {dt.shortLabel}
+                            </button>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -772,7 +1158,8 @@ const Dashboard = () => {
                 ) : (
                   <div className="card glass p-10 text-center">
                     <p style={{ color: "var(--text-muted)" }}>
-                      No global fields yet. Add some to build your profile!
+                      No fields in "{currentEditingProfile.name}" yet. Add some
+                      to build this profile!
                     </p>
                   </div>
                 )}
@@ -814,9 +1201,9 @@ const Dashboard = () => {
                           lineHeight: 1.6,
                         }}
                       >
-                        Open any webpage with a form. Open the extension popup,
-                        enable <strong>Record Mode</strong>, and submit the
-                        form.
+                        Open any webpage with a form. Enable{" "}
+                        <strong>Record Mode</strong> and submit the form, or
+                        click <strong>Save Current</strong> in the popup.
                       </p>
                     </div>
                     <div className="card glass flex-1 p-6">
@@ -829,10 +1216,9 @@ const Dashboard = () => {
                           lineHeight: 1.6,
                         }}
                       >
-                        Visit this dashboard. Select the captured URL and refine
-                        the values. Use{" "}
-                        <strong>&#123;&#123;timestamp&#125;&#125;</strong> for
-                        unique values.
+                        Set <strong>Match Mode</strong> (Exact, Domain, or
+                        Prefix), organize into <strong>Profiles</strong>, and
+                        add dynamic tags.
                       </p>
                     </div>
                     <div className="card glass flex-1 p-6">
@@ -845,9 +1231,10 @@ const Dashboard = () => {
                           lineHeight: 1.6,
                         }}
                       >
-                        Head back to the form. Click the purple sparkle icons or
-                        use <strong>Opt+A</strong> (Mac) /{" "}
-                        <strong>Alt+A</strong> (Win) to autofill instantly.
+                        Click any per-field sparkle icon to fill that field, or
+                        use <strong>Command+Shift+A</strong> (Mac) /{" "}
+                        <strong>Alt+Shift+A</strong> (Win) to fill the whole
+                        form.
                       </p>
                     </div>
                   </div>
@@ -864,46 +1251,40 @@ const Dashboard = () => {
                   >
                     Dynamic Tags
                   </h3>
-                  <div className="flex flex-col gap-4">
-                    <div className="card" style={{ padding: "20px" }}>
-                      <code
-                        style={{
-                          background: "var(--bg-color)",
-                          padding: "4px 8px",
-                          borderRadius: "6px",
-                          color: "var(--accent)",
-                          display: "inline-block",
-                          marginBottom: "10px",
-                        }}
+                  <div className="grid grid-cols-2 gap-4">
+                    {DYNAMIC_TAGS.map((dt) => (
+                      <div
+                        key={dt.tag}
+                        className="card"
+                        style={{ padding: "16px" }}
                       >
-                        &#123;&#123;timestamp&#125;&#125;
-                      </code>
-                      <p style={{ fontSize: "14px", lineHeight: 1.6 }}>
-                        Replaces with current millisecond time. Perfect for
-                        unique emails:{" "}
-                        <code>
-                          user+&#123;&#123;timestamp&#125;&#125;@gmail.com
+                        <code
+                          style={{
+                            background: "var(--bg-color)",
+                            padding: "4px 8px",
+                            borderRadius: "6px",
+                            color: "var(--accent)",
+                            display: "inline-block",
+                            marginBottom: "8px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          {dt.tag}
                         </code>
-                      </p>
-                    </div>
-                    <div className="card" style={{ padding: "20px" }}>
-                      <code
-                        style={{
-                          background: "var(--bg-color)",
-                          padding: "4px 8px",
-                          borderRadius: "6px",
-                          color: "var(--accent)",
-                          display: "inline-block",
-                          marginBottom: "10px",
-                        }}
-                      >
-                        &#123;&#123;autoIncrement&#125;&#125;
-                      </code>
-                      <p style={{ fontSize: "14px", lineHeight: 1.6 }}>
-                        Replaces with a number that goes up +1 every time you
-                        autofill. Great for sequential testing.
-                      </p>
-                    </div>
+                        <p style={{ fontSize: "13px", lineHeight: 1.5 }}>
+                          {dt.description}
+                        </p>
+                        <p
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--text-muted)",
+                            marginTop: "6px",
+                          }}
+                        >
+                          Example: <code>{dt.example}</code>
+                        </p>
+                      </div>
+                    ))}
                   </div>
                 </section>
               </div>
@@ -922,8 +1303,8 @@ const Dashboard = () => {
                 Select a template to begin
               </h2>
               <p>
-                Choose from the sidebar or enable Record Mode to capture your
-                first form.
+                Choose from the sidebar, click + to create one, or enable Record
+                Mode to capture your first form.
               </p>
             </div>
           )}

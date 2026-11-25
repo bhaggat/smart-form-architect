@@ -1,25 +1,74 @@
 /// <reference types="chrome"/>
 
+import {
+  DEFAULT_SETTINGS,
+  type Profile,
+  type TemplateData,
+  type TemplatesMap,
+} from "./types/storage";
+import { findMatchingTemplate, isDomainExcluded } from "./utils/matching";
+
 interface StorageResult {
-  templates?: Record<string, unknown>;
+  templates?: TemplatesMap;
   autoIncrement?: number;
+  excludedDomains?: string[];
+  profiles?: Profile[];
+  activeProfileId?: string;
+  globalFields?: unknown[];
+  reviewPromptState?: { installedAt?: number };
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  // Initialize storage
   chrome.storage.local.get(
-    ["templates", "autoIncrement", "reviewPromptState"],
-    (result: StorageResult & { reviewPromptState?: { installedAt?: number } }) => {
-      if (!result.templates) {
-        chrome.storage.local.set({ templates: {} });
-      }
-      if (result.autoIncrement === undefined) {
-        chrome.storage.local.set({ autoIncrement: 1 });
-      }
+    [
+      "templates",
+      "autoIncrement",
+      "reviewPromptState",
+      "profiles",
+      "activeProfileId",
+      "globalFields",
+      "accentColor",
+      "excludePasswords",
+      "autoFillDelay",
+    ],
+    (
+      result: StorageResult & {
+        accentColor?: string;
+        excludePasswords?: boolean;
+        autoFillDelay?: number;
+      },
+    ) => {
+      const updates: Record<string, unknown> = {};
+
+      if (!result.templates) updates.templates = {};
+      if (result.autoIncrement === undefined) updates.autoIncrement = 1;
       if (!result.reviewPromptState?.installedAt) {
-        chrome.storage.local.set({
-          reviewPromptState: { installedAt: Date.now() },
-        });
+        updates.reviewPromptState = { installedAt: Date.now() };
+      }
+      if (!result.profiles || result.profiles.length === 0) {
+        updates.profiles = [
+          {
+            id: "default",
+            name: "Personal",
+            fields: Array.isArray(result.globalFields)
+              ? result.globalFields
+              : [],
+          },
+        ];
+        updates.activeProfileId = "default";
+      }
+      if (!result.accentColor) {
+        updates.accentColor = DEFAULT_SETTINGS.accentColor;
+      }
+      if (result.excludePasswords === undefined) {
+        updates.excludePasswords = DEFAULT_SETTINGS.excludePasswords;
+      }
+      if (result.autoFillDelay === undefined) {
+        updates.autoFillDelay = DEFAULT_SETTINGS.autoFillDelay;
+      }
+
+      if (Object.keys(updates).length > 0) {
+        chrome.storage.local.set(updates);
       }
     },
   );
@@ -27,26 +76,39 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onMessage.addListener(
   (
-    message: { action: string; payload?: { url: string; data?: unknown } },
+    message: {
+      action: string;
+      payload?: { url: string; data?: TemplateData };
+    },
     _sender: chrome.runtime.MessageSender,
     sendResponse: (response?: unknown) => void,
   ) => {
-    console.log(
-      `[SmartForm] [Background] Received action: ${message.action}`,
-      message.payload,
-    );
     if (message.action === "saveForm" && message.payload) {
       const { url, data } = message.payload;
-      console.log(`[SmartForm] [Background] Saving form for URL: ${url}`, data);
-      chrome.storage.local.get("templates", (result: StorageResult) => {
-        const templates = result.templates || {};
-        templates[url] = data;
-        chrome.storage.local.set({ templates }, () => {
-          console.log(`[SmartForm] [Background] Form saved successfully.`);
-          sendResponse({ success: true });
-        });
-      });
-      return true; // Keep channel open for async response
+      chrome.storage.local.get(
+        ["templates", "excludedDomains"],
+        (result: StorageResult) => {
+          if (isDomainExcluded(url, result.excludedDomains)) {
+            sendResponse({ success: false, excluded: true });
+            return;
+          }
+
+          const templates = result.templates || {};
+          const existing = templates[url];
+          templates[url] = {
+            ...existing,
+            ...data,
+            name: existing?.name || data?.name || url,
+            matchMode: existing?.matchMode || data?.matchMode || "exact",
+            category: existing?.category || data?.category || "",
+            updatedAt: Date.now(),
+          };
+          chrome.storage.local.set({ templates }, () => {
+            sendResponse({ success: true });
+          });
+        },
+      );
+      return true;
     }
 
     if (message.action === "getAutoIncrement") {
@@ -57,30 +119,31 @@ chrome.runtime.onMessage.addListener(
           sendResponse({ value: currentVal });
         });
       });
-      return true; // Keep channel open
+      return true;
     }
 
     if (message.action === "getTemplate" && message.payload) {
       const { url } = message.payload;
-      chrome.storage.local.get("templates", (result: StorageResult) => {
-        const templates = result.templates || {};
-        console.log(
-          `[SmartForm] [Background] getTemplate result for ${url}:`,
-          templates[url] ? "Found" : "Not Found",
-        );
-        sendResponse({ template: templates[url] || null });
-      });
+      chrome.storage.local.get(
+        ["templates", "excludedDomains"],
+        (result: StorageResult) => {
+          if (isDomainExcluded(url, result.excludedDomains)) {
+            sendResponse({ template: null, excluded: true });
+            return;
+          }
+          const matched = findMatchingTemplate(result.templates, url);
+          sendResponse({ template: matched });
+        },
+      );
       return true;
     }
   },
 );
 
 chrome.commands.onCommand.addListener((command) => {
-  console.log(`[SmartForm] [Background] Received command: ${command}`);
   if (command === "run_autofill") {
     chrome.storage.local.get("enableShortcut", (res) => {
       if (res.enableShortcut === false) {
-        console.log("[SmartForm] [Background] Shortcut disabled in settings.");
         return;
       }
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
