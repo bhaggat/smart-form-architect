@@ -57,10 +57,9 @@ The Chrome Web Store review process is strict about data handling. Since SmartFo
   > "SmartForm Architect is designed strictly to observe, save, and manage reusable form architectures and data locally to rapidly autofill forms in the user's browser."
 
 - **Permission Justifications:**
-  You requested 3 permissions in your `manifest.json`. Justify them in the store as follows:
+  You requested 1 permission in your `manifest.json`. Justify it in the store as follows:
   - **`storage`**: "Required to save user-defined form templates, structural field data, and UI preference settings locally on the user's browser via the chrome.storage.local API."
-  - **`activeTab`**: "Required to safely identify the current URL, analyze visible input fields, and inject necessary autofill ghost icons dynamically inside forms without needing persistent background access to all tabs."
-  - **`scripting`**: "Required to execute the form-detection and autofill algorithm securely within the context of the user's currently focused webpage when triggered via UI actions or shortcuts."
+  - **Content Scripts (`<all_urls>`)**: "Required so the extension can detect forms, display autofill ghost icons, and autofill fields on any website the user chooses to use."
 
 - **Data Usage Policy:**
   - Do you sell data to third parties? **Answer: No.**
